@@ -35,8 +35,8 @@ def _is_synced_today(last_successful_sync) -> bool:
     return last_successful_sync.astimezone(timezone.utc).date() == now_utc.date()
 
 
-async def run_daily_bank_sync_once():
-    """Sync users with active token-backed bank accounts if they haven't synced successfully today."""
+async def run_daily_bank_sync_once(force: bool = False):
+    """Sync users with active token-backed bank accounts. If force is True, bypasses the once-a-day check."""
     db = SessionLocal()
     try:
         candidates = (
@@ -58,7 +58,7 @@ async def run_daily_bank_sync_once():
                 .filter(BankSyncStatus.user_id == user_id)
                 .first()
             )
-            if sync_status and _is_synced_today(sync_status.last_successful_sync):
+            if not force and sync_status and _is_synced_today(sync_status.last_successful_sync):
                 continue
 
             success = False
@@ -85,9 +85,12 @@ async def run_daily_bank_sync_once():
 
 async def run_daily_bank_sync_loop(interval_minutes: int = 60):
     """Periodic loop that guarantees at least one daily bank sync attempt per eligible user."""
+    is_first_run = True
     while True:
         try:
-            await run_daily_bank_sync_once()
+            # First execution on server restart is forced to ensure fresh transaction retrieval
+            await run_daily_bank_sync_once(force=is_first_run)
+            is_first_run = False
         except Exception:
             logger.exception("Unexpected error in daily bank sync loop")
 

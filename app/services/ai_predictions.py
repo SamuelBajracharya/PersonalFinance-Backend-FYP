@@ -42,6 +42,15 @@ def generate_and_store_predictions_for_user(
                 look_back=look_back,
             )
 
+            # Check if user was already warned today for this category/horizon
+            existing_today_pred = db.query(DailyPrediction).filter_by(
+                user_id=user_id,
+                category=budget.category,
+                prediction_date=prediction_date,
+                time_horizon=time_horizon,
+            ).first()
+            already_notified = existing_today_pred is not None and existing_today_pred.risk_level == "HIGH"
+
             # Delete existing prediction for this user/category/date/horizon (if any)
             db.query(DailyPrediction).filter_by(
                 user_id=user_id,
@@ -70,6 +79,19 @@ def generate_and_store_predictions_for_user(
             dispatcher.dispatch(
                 PredictionGenerated(db, user_id, payload["prediction_id"], payload)
             )
+
+            # Trigger real-time overspending email if risk shifts to HIGH and user hasn't been warned today
+            if (risk_level == "HIGH" or float(risk_prob) > 0.7) and not already_notified:
+                user_model = db.query(User).filter(User.user_id == user_id).first()
+                if user_model and user_model.email:
+                    from app.utils.email import send_budget_warning_email
+                    send_budget_warning_email(
+                        to_email=user_model.email,
+                        category=budget.category,
+                        remaining_budget=float(budget.remaining_budget),
+                        predicted_amount=float(predicted_amount),
+                        risk_probability=float(risk_prob),
+                    )
         except FileNotFoundError:
             continue
         except Exception as e:
