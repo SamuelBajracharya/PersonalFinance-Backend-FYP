@@ -20,6 +20,7 @@ from app.config.settings import settings
 from app.services.event_logger import log_event_async
 from app.utils import dispatcher
 from app.utils.events import TransactionCreated
+from app.utils.auth import encrypt_user_data, decrypt_user_data
 
 EXTERNAL_BANK_API_BASE_URL = settings.KOSHCONNECT_BASE_URL.rstrip("/")
 STOCK_ENDPOINTS_FALLBACK = ("/stock-instruments", "/instruments", "/investments")
@@ -261,7 +262,9 @@ async def login_and_sync_all_accounts(
         async with httpx.AsyncClient(timeout=20.0) as client:
             try:
                 if bank_token:
-                    headers = {"Authorization": f"Bearer {bank_token}"}
+                    # Decrypt the token for usage in API calls
+                    active_token = decrypt_user_data(bank_token, user_id)
+                    headers = {"Authorization": f"Bearer {active_token}"}
                     # Fetch user_id from /users/me/
                     user_info = await _get_json(
                         client=client,
@@ -280,7 +283,7 @@ async def login_and_sync_all_accounts(
                     )
                     login_data = {
                         "accounts": _extract_accounts_from_payload(accounts_payload),
-                        "access_token": bank_token,
+                        "access_token": active_token,
                         "user_id": user_id_kosh,
                     }
                 else:
@@ -325,6 +328,8 @@ async def login_and_sync_all_accounts(
 
             accounts = _extract_accounts_from_payload(login_data)
             bank_token = login_data.get("access_token")
+            # For API requests, use the decrypted token
+            active_token = bank_token
             external_user_id = _extract_user_id_from_payload(login_data)
             if not external_user_id and accounts:
                 external_user_id = _extract_user_id_from_payload(accounts[0])
@@ -336,7 +341,7 @@ async def login_and_sync_all_accounts(
             summary["synced_accounts"] = accounts
             summary["bank_token"] = bank_token
 
-            headers = {"Authorization": f"Bearer {bank_token}"}
+            headers = {"Authorization": f"Bearer {active_token}"}
             synced_accounts_result = []
 
             stock_instruments = _extract_instruments_from_payload(login_data)
@@ -409,11 +414,11 @@ async def login_and_sync_all_accounts(
                             external_account_id=external_account_id,
                             user_id=user_id,
                             bank_name=bank_name,
-                            account_number_masked=account_number_masked,
+                            account_number_masked=encrypt_user_data(account_number_masked, user_id),
                             account_type=account_type,
                             balance=balance,
                             is_active=True,
-                            bank_token=bank_token,
+                            bank_token=encrypt_user_data(bank_token, user_id),
                         )
                         db.add(local_account)
                         db.commit()
@@ -467,8 +472,9 @@ async def login_and_sync_all_accounts(
                         db.refresh(local_account)
 
                     # Update bank_token if changed
-                    if local_account.bank_token != bank_token:
-                        local_account.bank_token = bank_token
+                    decrypted_existing_token = decrypt_user_data(local_account.bank_token, user_id)
+                    if decrypted_existing_token != bank_token:
+                        local_account.bank_token = encrypt_user_data(bank_token, user_id)
                         db.commit()
                         db.refresh(local_account)
 
@@ -546,8 +552,8 @@ async def login_and_sync_all_accounts(
                             currency=tx.get("currency") or "NPR",
                             type=tx.get("type") or "DEBIT",
                             status=tx.get("status") or "BOOKED",
-                            description=tx.get("description"),
-                            merchant=tx.get("merchant"),
+                            description=encrypt_user_data(tx.get("description"), user_id),
+                            merchant=encrypt_user_data(tx.get("merchant"), user_id),
                             category=tx.get("category"),
                         )
                         db.add(new_tx)

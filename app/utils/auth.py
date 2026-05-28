@@ -76,3 +76,41 @@ def decrypt_token(token: str) -> dict:
         return payload
     except Exception as e:
         raise ValueError(f"Invalid or expired token: {e}")
+
+
+# ------------------- Per-User Data Encryption Helpers ------------------- #
+def get_user_encryption_key(user_id: str) -> bytes:
+    """
+    Derive a unique 32-byte Fernet key for a specific user using HMAC-SHA256.
+    """
+    import hmac
+    import hashlib
+    import base64
+    # encryption_key_bytes is derived from settings.ENCRYPTION_KEY
+    h = hmac.new(encryption_key_bytes, user_id.encode("utf-8"), hashlib.sha256)
+    return base64.urlsafe_b64encode(h.digest())
+
+
+def encrypt_user_data(data: str, user_id: str) -> str:
+    """Encrypt sensitive string data using a user-specific derived key."""
+    if not data:
+        return data
+    from cryptography.fernet import Fernet
+    key = get_user_encryption_key(user_id)
+    f = Fernet(key)
+    return f.encrypt(data.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_user_data(encrypted_data: str, user_id: str) -> str:
+    """Decrypt sensitive string data using a user-specific derived key."""
+    if not encrypted_data:
+        return encrypted_data
+    from cryptography.fernet import Fernet
+    try:
+        key = get_user_encryption_key(user_id)
+        f = Fernet(key)
+        return f.decrypt(encrypted_data.encode("utf-8")).decode("utf-8")
+    except Exception:
+        # Fallback to returning data as-is if it's not encrypted (e.g. legacy database records)
+        return encrypted_data
+

@@ -8,8 +8,8 @@ from app.services.what_if_scenarios import get_what_if_scenarios
 router = APIRouter()
 
 
-@router.get(
-    "/",
+@router.post(
+    "/generate",
     response_model=list[WhatIfScenario],
     summary="Get What-If Scenarios",
     description="Analyzes current month's expenses and generates savings scenarios.",

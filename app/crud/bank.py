@@ -5,22 +5,46 @@ from datetime import datetime, timedelta
 
 from app.models.bank import BankAccount, Transaction
 from app.schemas.bank import TransactionCreate
+from app.utils.auth import encrypt_user_data, decrypt_user_data
+
+
+def _decrypt_bank_account(account, user_id: str):
+    if account:
+        account.account_number_masked = decrypt_user_data(account.account_number_masked, user_id)
+        account.bank_token = decrypt_user_data(account.bank_token, user_id)
+    return account
+
+
+def _decrypt_transaction(tx, user_id: str):
+    if tx:
+        tx.description = decrypt_user_data(tx.description, user_id)
+        tx.merchant = decrypt_user_data(tx.merchant, user_id)
+    return tx
 
 
 def get_bank_account(db: Session, bank_account_id: uuid.UUID):
-    return db.query(BankAccount).filter(BankAccount.id == bank_account_id).first()
+    account = db.query(BankAccount).filter(BankAccount.id == bank_account_id).first()
+    if account:
+        _decrypt_bank_account(account, account.user_id)
+    return account
 
 
 def get_bank_accounts_by_user(db: Session, user_id: str):
-    return db.query(BankAccount).filter(BankAccount.user_id == user_id).all()
+    accounts = db.query(BankAccount).filter(BankAccount.user_id == user_id).all()
+    for account in accounts:
+        _decrypt_bank_account(account, user_id)
+    return accounts
 
 
 def get_bank_account_by_user_and_bank_name(db: Session, user_id: str, bank_name: str):
-    return (
+    account = (
         db.query(BankAccount)
         .filter(BankAccount.user_id == user_id, BankAccount.bank_name == bank_name)
         .first()
     )
+    if account:
+        _decrypt_bank_account(account, user_id)
+    return account
 
 
 def deactivate_bank_accounts_by_user(db: Session, user_id: str):
@@ -36,28 +60,44 @@ def delete_transactions_by_user(db: Session, user_id: str):
 
 
 def create_transaction(db: Session, transaction: TransactionCreate, user_id: str):
-    db_transaction = Transaction(**transaction.model_dump(), user_id=user_id)
+    tx_data = transaction.model_dump()
+    if tx_data.get("description"):
+        tx_data["description"] = encrypt_user_data(tx_data["description"], user_id)
+    if tx_data.get("merchant"):
+        tx_data["merchant"] = encrypt_user_data(tx_data["merchant"], user_id)
+
+    db_transaction = Transaction(**tx_data, user_id=user_id)
     db.add(db_transaction)
     db.commit()
     db.refresh(db_transaction)
+    _decrypt_transaction(db_transaction, user_id)
     return db_transaction
 
 
 def get_transactions_by_account(db: Session, account_id: uuid.UUID):
-    return db.query(Transaction).filter(Transaction.account_id == account_id).all()
+    transactions = db.query(Transaction).filter(Transaction.account_id == account_id).all()
+    for tx in transactions:
+        _decrypt_transaction(tx, tx.user_id)
+    return transactions
 
 
 def get_transactions_by_user(db: Session, user_id: str):
-    return db.query(Transaction).filter(Transaction.user_id == user_id).all()
+    transactions = db.query(Transaction).filter(Transaction.user_id == user_id).all()
+    for tx in transactions:
+        _decrypt_transaction(tx, user_id)
+    return transactions
 
 
 def get_user_transactions_last_30_days(db: Session, user_id: str):
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-    return (
+    transactions = (
         db.query(Transaction)
         .filter(Transaction.user_id == user_id, Transaction.date >= thirty_days_ago)
         .all()
     )
+    for tx in transactions:
+        _decrypt_transaction(tx, user_id)
+    return transactions
 
 
 def get_total_spending_for_category_and_month(
