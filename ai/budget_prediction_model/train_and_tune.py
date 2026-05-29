@@ -18,17 +18,24 @@ tf.random.set_seed(42)
 
 XGB_FEATURE_COLUMNS = [
     "day_of_week",
+    "sin_day_of_week",
+    "cos_day_of_week",
     "day_of_month",
+    "days_from_payday",
+    "month_progress",     # day_of_month / 30.0  — budget-cycle position
     "is_weekend",
     "lag_1_amount",
     "lag_2_amount",
     "lag_3_amount",
+    "lag_7_amount",       # amount 7 days ago — captures weekly seasonality
     "rolling_3_mean",
     "rolling_7_mean",
     "rolling_14_mean",
     "rolling_7_std",
     "rolling_14_std",
     "trend_7",
+    "spend_velocity",     # lag_1 - rolling_7_mean  — short-term momentum
+    "spend_to_avg_ratio", # lag_1 / rolling_14_mean — relative spend level
     "lstm_predicted",
 ]
 
@@ -188,26 +195,47 @@ def _build_xgb_dataset(series: pd.Series, lstm_pred_series: pd.Series):
     df = pd.DataFrame(index=series.index)
     df["actual_amount"] = series.astype(float)
 
-    # Feature set based only on past values at time t for predicting t+1.
-    df["day_of_week"] = pd.to_datetime(df.index).dayofweek
-    df["day_of_month"] = pd.to_datetime(df.index).day
-    df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
+    # ── Temporal features ──────────────────────────────────────────────────
+    df["day_of_week"]   = pd.to_datetime(df.index).dayofweek
+    df["sin_day_of_week"] = np.sin(2 * np.pi * df["day_of_week"] / 7.0)
+    df["cos_day_of_week"] = np.cos(2 * np.pi * df["day_of_week"] / 7.0)
+    df["day_of_month"]  = pd.to_datetime(df.index).day
+    df["days_from_payday"] = df["day_of_month"].apply(lambda d: min(d - 1, 30 - d))
+    df["month_progress"] = df["day_of_month"] / 30.0   # budget-cycle position
+    df["is_weekend"]    = (df["day_of_week"] >= 5).astype(int)
 
+    # ── Lag features (strictly past values — no leakage) ──────────────────
     df["lag_1_amount"] = df["actual_amount"].shift(1)
     df["lag_2_amount"] = df["actual_amount"].shift(2)
     df["lag_3_amount"] = df["actual_amount"].shift(3)
+    df["lag_7_amount"] = df["actual_amount"].shift(7)
 
-    df["rolling_3_mean"] = df["actual_amount"].shift(1).rolling(3).mean()
-    df["rolling_7_mean"] = df["actual_amount"].shift(1).rolling(7).mean()
+    # ── Rolling statistics ────────────────────────────────────────────────
+    df["rolling_3_mean"]  = df["actual_amount"].shift(1).rolling(3).mean()
+    df["rolling_7_mean"]  = df["actual_amount"].shift(1).rolling(7).mean()
     df["rolling_14_mean"] = df["actual_amount"].shift(1).rolling(14).mean()
-    df["rolling_7_std"] = df["actual_amount"].shift(1).rolling(7).std()
-    df["rolling_14_std"] = df["actual_amount"].shift(1).rolling(14).std()
-    df["trend_7"] = df["actual_amount"].shift(1) - df["actual_amount"].shift(8)
+    df["rolling_7_std"]   = df["actual_amount"].shift(1).rolling(7).std()
+    df["rolling_14_std"]  = df["actual_amount"].shift(1).rolling(14).std()
+    df["trend_7"]         = df["actual_amount"].shift(1) - df["actual_amount"].shift(8)
 
+    # ── Momentum / relative features ─────────────────────────────────────
+    # spend_velocity: how far today's spend deviates from the 7-day average
+    df["spend_velocity"]     = df["lag_1_amount"] - df["rolling_7_mean"]
+    # spend_to_avg_ratio: relative spend level vs the longer-term baseline
+    df["spend_to_avg_ratio"] = df["lag_1_amount"] / (df["rolling_14_mean"] + 1e-6)
+
+    # ── LSTM predictions as a feature ─────────────────────────────────────
     df["lstm_predicted"] = lstm_pred_series.reindex(df.index)
 
+    # ── Risk label ────────────────────────────────────────────────────────
+    # Conservative threshold: 14-day mean + 0.75 × 7-day std.
+    # Using the longer baseline reduces sensitivity to short weekly spikes
+    # while the tighter multiplier (0.75 vs old 0.5) catches genuine surges.
     df["target_next_amount"] = df["actual_amount"].shift(-1)
-    threshold = df["rolling_7_mean"] + 0.5 * df["rolling_7_std"].fillna(0)
+    threshold = (
+        df["rolling_14_mean"]
+        + 0.75 * df["rolling_7_std"].fillna(0)
+    )
     df["risk_label"] = (df["target_next_amount"] > threshold).astype(int)
 
     df = df.dropna().copy()
@@ -301,8 +329,9 @@ def train_models(
     look_back: int = 30,
 ):
     df = pd.read_csv(transactions_file)
-    df["date"] = pd.to_datetime(df["date"]).dt.date
+    df["date"] = pd.to_datetime(df["date"], format='mixed', utc=True).dt.date
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    df["category"] = df["category"].astype(str).str.strip().str.title()
     df = df.dropna(subset=["amount"]).copy()
 
     daily_series, account_columns = _build_category_daily_series(
@@ -373,7 +402,7 @@ def train_all_categories(
 ):
     df = pd.read_csv(transactions_file)
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
-    df["category"] = df["category"].astype(str).str.strip()
+    df["category"] = df["category"].astype(str).str.strip().str.title()
     df = df.dropna(subset=["amount"]).copy()
 
     category_counts = (

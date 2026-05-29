@@ -4,6 +4,7 @@ from ai.budget_prediction_model.inference import predict_next_day
 from app.models.user import User
 from app.schemas.ai_predictions import DailyPredictionCreate
 from decimal import Decimal
+from datetime import date
 import logging
 from app.utils import dispatcher
 from app.utils.events import PredictionGenerated
@@ -27,6 +28,10 @@ def generate_and_store_predictions_for_user(
 
     for budget in budgets:
         try:
+            # Compute days remaining in the budget period so the model can
+            # apply budget-aware risk calibration and period projection.
+            days_left = max(0, (budget.end_date - date.today()).days)
+
             (
                 predicted_amount,
                 risk_prob,
@@ -35,11 +40,13 @@ def generate_and_store_predictions_for_user(
                 day_of_week,
                 day_of_week_id,
                 rolling_7_day_avg,
+                projected_period_spend,   # cumulative ML forecast for remaining days
             ) = predict_next_day(
                 user_id=user_id,
                 category=budget.category,
-                budget_remaining=budget.remaining_budget,
+                budget_remaining=float(budget.remaining_budget or budget.budget_amount),
                 look_back=look_back,
+                days_left=days_left,
             )
 
             # Check if user was already warned today for this category/horizon
@@ -80,15 +87,24 @@ def generate_and_store_predictions_for_user(
                 PredictionGenerated(db, user_id, payload["prediction_id"], payload)
             )
 
-            # Trigger real-time overspending email if risk shifts to HIGH and user hasn't been warned today
-            if (risk_level == "HIGH" or float(risk_prob) > 0.7) and not already_notified:
+            # Trigger real-time overspending email if:
+            #   • tomorrow's risk is HIGH, OR
+            #   • the multi-step period projection exceeds the total budget, OR
+            #   • raw risk probability is very high (≥ 0.7)
+            # …and the user hasn't already been warned today for this category.
+            budget_amount = float(budget.budget_amount or 0)
+            period_will_overshoot = (
+                projected_period_spend > 0
+                and projected_period_spend > budget_amount
+            )
+            if (risk_level == "HIGH" or float(risk_prob) >= 0.7 or period_will_overshoot) and not already_notified:
                 user_model = db.query(User).filter(User.user_id == user_id).first()
                 if user_model and user_model.email:
                     from app.utils.email import send_budget_warning_email
                     send_budget_warning_email(
                         to_email=user_model.email,
                         category=budget.category,
-                        remaining_budget=float(budget.remaining_budget),
+                        remaining_budget=float(budget.remaining_budget or budget.budget_amount),
                         predicted_amount=float(predicted_amount),
                         risk_probability=float(risk_prob),
                     )
