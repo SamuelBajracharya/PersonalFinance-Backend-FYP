@@ -33,5 +33,8 @@ class Budget(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     is_completed = Column(Boolean, nullable=False, default=False)
+    past_spending = Column(Numeric(10, 2), nullable=True)
+    reduction_percent = Column(Numeric(5, 2), nullable=True)
+    is_successful = Column(Boolean, nullable=True)
 
     user = relationship("User", back_populates="budgets")

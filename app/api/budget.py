@@ -28,6 +28,57 @@ from app.services.budget_goal_intelligence import (
 router = APIRouter()
 
 
+@router.get("/past-spending", response_model=schemas.budget.PastSpendingOptionsResponse)
+def get_past_spending_options(
+    category: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from datetime import datetime
+    from sqlalchemy import func
+    from app.models.bank import Transaction
+
+    today = date.today()
+    first_of_this_month = today.replace(day=1)
+    last_month_end = first_of_this_month - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+
+    total_spent = (
+        db.query(func.sum(Transaction.amount))
+        .filter(
+            Transaction.user_id == current_user.user_id,
+            Transaction.type == "DEBIT",
+            Transaction.category == category,
+            Transaction.date >= datetime.combine(last_month_start, datetime.min.time()),
+            Transaction.date <= datetime.combine(last_month_end, datetime.max.time()),
+        )
+        .scalar()
+    )
+    total_spent = float(total_spent) if total_spent is not None else 0.0
+
+    if total_spent <= 0.0:
+        total_spent = 5000.0
+
+    options = []
+    percentages = [5, 10, 15, 20, 25, 30]
+    for p in percentages:
+        estimated_savings = round(total_spent * (p / 100.0), 2)
+        new_budget_amount = round(total_spent - estimated_savings, 2)
+        label = f"{p}% reduction (Saves Rs {int(estimated_savings)}, Budget Rs {int(new_budget_amount)})"
+        options.append({
+            "reduction_percent": p,
+            "estimated_savings": estimated_savings,
+            "new_budget_amount": new_budget_amount,
+            "label": label
+        })
+
+    return {
+        "category": category,
+        "past_spending": total_spent,
+        "options": options
+    }
+
+
 @router.post("/", response_model=schemas.Budget, status_code=status.HTTP_201_CREATED)
 def create_budget(
     budget: schemas.BudgetCreate,
@@ -35,7 +86,7 @@ def create_budget(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if budget.budget_amount < 500:
+    if budget.past_spending is None and budget.budget_amount < 500:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Budget amount must be at least 500.",

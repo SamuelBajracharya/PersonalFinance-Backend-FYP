@@ -79,7 +79,7 @@ def create_budget(db: Session, budget: BudgetCreate, user_id: str):
 
     days_elapsed_in_month = max(1, budget.start_date.day)
     current_month_spending_decimal = Decimal(str(current_month_spending))
-    if current_month_spending_decimal > 0:
+    if budget.past_spending is None and current_month_spending_decimal > 0:
         projected_30_day_max = (
             current_month_spending_decimal / Decimal(days_elapsed_in_month)
         ) * Decimal(30)
@@ -125,6 +125,10 @@ def evaluate_budget_completion(db: Session, budget: Budget, user: User) -> bool:
     """
     Evaluates if a budget goal is met, grants XP, and calculates savings.
     Returns True if the budget was met or exceeded, False otherwise.
+    
+    IMPORTANT: This function is the ONLY logic where user.savings is allowed
+    to be incremented from budget progress. No other paths (e.g. manual transaction imports
+    under "Savings" category) are allowed to modify user.savings to prevent cheating.
     """
     total_spending = get_total_spending_for_category_and_month(
         db,
@@ -137,21 +141,32 @@ def evaluate_budget_completion(db: Session, budget: Budget, user: User) -> bool:
     # Convert total_spending to Decimal for consistent arithmetic
     total_spending_decimal = Decimal(str(total_spending))
 
-    if total_spending_decimal <= budget.budget_amount:
+    success = (total_spending_decimal <= budget.budget_amount)
+    
+    # Save the outcome of the budget goal
+    budget.is_successful = success
+    db.add(budget)
+
+    # Calculate savings difference based on past spending if available
+    if budget.past_spending is not None:
+        past_spending_decimal = Decimal(str(budget.past_spending))
+        savings_diff = past_spending_decimal - total_spending_decimal
+        user.savings = max(0, user.savings + int(savings_diff))
+        print(f"User {user.user_id} updated savings by Rs {savings_diff:.2f} (diff from past spending {past_spending_decimal:.2f})")
+    else:
+        # Legacy/fallback budget calculation
+        if success and budget.budget_amount > total_spending_decimal:
+            savings = budget.budget_amount - total_spending_decimal
+            user.savings += int(savings)
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    if success:
         # Budget goal successful
         # Grant fixed XP for budget goal completion
         user.total_xp += 10
-
-        # Calculate and persist savings
-        if (
-            budget.budget_amount > total_spending_decimal
-        ):  # Use total_spending_decimal here
-            savings = (
-                budget.budget_amount - total_spending_decimal
-            )  # Use total_spending_decimal here
-            user.savings += int(savings)  # Ensure savings are integers
-            print(f"User {user.user_id} saved Rs {savings:.2f} for budget {budget.id}")
-
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -192,8 +207,12 @@ def update_completed_budgets_for_user(db: Session, user_id: str):
     )
 
     for budget in uncompleted_budgets:
-        if evaluate_budget_completion(db, budget, user):
-            user.goals_completed += 1
+        is_success = evaluate_budget_completion(db, budget, user)
+        budget.is_completed = True
+        db.add(budget)
+        db.commit() # Commit budget status first so it's queryable
+
+        if is_success:
             from app.services.event_logger import log_event_async
 
             log_event_async(
@@ -210,9 +229,14 @@ def update_completed_budgets_for_user(db: Session, user_id: str):
                 },
             )
 
-        budget.is_completed = True
-        db.add(budget)
-
+    # Recalculate goals_completed based on total completed AND successful budgets in database
+    user.goals_completed = db.query(Budget).filter(
+        Budget.user_id == user_id,
+        Budget.is_completed == True,
+        Budget.is_successful == True
+    ).count()
+    
+    db.add(user)
     db.commit()
     db.refresh(user)
 

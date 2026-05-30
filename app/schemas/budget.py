@@ -9,6 +9,8 @@ class BudgetBase(BaseModel):
     budget_amount: Decimal
     start_date: date = Field(default_factory=date.today)
     end_date: date = Field(default_factory=lambda: date.today() + timedelta(days=30))
+    past_spending: Optional[Decimal] = None
+    reduction_percent: Optional[Decimal] = None
 
 class BudgetCreate(BudgetBase):
     pass
@@ -22,9 +24,25 @@ class Budget(BudgetBase):
     start_date: date
     end_date: date
     remaining_budget: Optional[Decimal] = None
+    past_spending: Optional[Decimal] = None
+    reduction_percent: Optional[Decimal] = None
+    is_successful: Optional[bool] = None
 
     class Config:
         from_attributes = True
+
+
+class PastSpendingOption(BaseModel):
+    reduction_percent: int
+    estimated_savings: float
+    new_budget_amount: float
+    label: str
+
+
+class PastSpendingOptionsResponse(BaseModel):
+    category: str
+    past_spending: float
+    options: list[PastSpendingOption]
 
 
 class BudgetGoalMicroAlert(BaseModel):
